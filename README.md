@@ -18,7 +18,7 @@ This tool kills processes and hijacks terminals system-wide. Do not run it on an
 4. Spawns a new shell on the same terminal running `exec vim '[file]'`.
 5. Waits for vim to exit, then sends `SIGCONT` to the parent shell.
 
-The result is a seamless swap with no visible gap.
+The result is a seamless swap with no visible gap (I am still trying to get rid of the `killed nano` message...).
 It also tracks and stores the number of swaps peformed per uid, if you want to put a wall of shame in your motd or somewhere else.
 
 ## Demo
