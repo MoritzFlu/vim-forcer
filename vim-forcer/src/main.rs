@@ -22,15 +22,16 @@ use tokio::{io::unix::AsyncFd, signal};
 use vim_forcer_common::{ExecEvent,MAX_NAME,MAX_PATH};
 
 
+// Convert string to bytes for better kernel access
 fn add_watched_tool(map: &mut HashMap<&mut aya::maps::MapData, [u8; MAX_NAME], u8>, tool: &str) {
     let mut key = [0u8; MAX_NAME];
     let bytes = tool.as_bytes();
-    let len = bytes.len().min(63); // leave room for null terminator
+    let len = bytes.len().min(MAX_NAME-1); // leave room for null terminator
     key[..len].copy_from_slice(&bytes[..len]);
     map.insert(key, 1, 0).expect("failed to insert tool");
 }
 
-
+// TODO: this should only be done once at start, is there a better way?
 fn username_for_uid(uid: u32) -> String {
     fs::read_to_string("/etc/passwd").ok()
         .and_then(|contents| {
@@ -46,6 +47,8 @@ fn username_for_uid(uid: u32) -> String {
         .unwrap_or_else(|| uid.to_string())
 }
 
+// TODO: better file format obviously needed.
+// The idea is to read/store it somewhere for e.g. motd to read it.
 fn write_swap_counts(path: &str, counts: &StdHashMap<u32, u64>) {
     let mut lines: Vec<String> = counts
         .iter()

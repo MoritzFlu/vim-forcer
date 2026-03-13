@@ -4,7 +4,7 @@ vim-forcer watches for attempts to open nano (or any configured editor) and repl
 
 ## Disclaimer
 
-This tool kills processes and hijacks terminals system-wide. Do not run it on any system you care about. It is intended for educational purposes only. The developer takes no responsibility for any damage or misuse.
+This tool kills processes and hijacks terminals system-wide. Do not run it on any critical system. It is intended for educational purposes only. The developer takes no responsibility for any damage or misuse.
 
 ## How it works
 
@@ -19,7 +19,7 @@ This tool kills processes and hijacks terminals system-wide. Do not run it on an
 5. Waits for vim to exit, then sends `SIGCONT` to the parent shell.
 
 The result is a seamless swap with no visible gap.
-
+It also tracks and stores the number of swaps peformed per uid, if you want to put a wall of shame in your motd or somewhere else.
 
 ## Demo
 
@@ -30,6 +30,9 @@ The result is a seamless swap with no visible gap.
 This project has been developed with assistance from AI-powered coding tools for code generation and documentation. All code has been reviewed, tested, and verified by me before inclusion.
 
 ---
+
+
+
 # Built with aya-template (https://github.com/aya-rs/aya-template)
 
 ## Prerequisites
