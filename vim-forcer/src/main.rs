@@ -70,7 +70,17 @@ fn get_parent_pid(pid: u32) -> Option<u32> {
     None
 }
 
-fn vim_swap(pid: u32, file_arg: &str) {
+fn get_gid(pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Gid:") {
+            return rest.split_whitespace().next()?.parse().ok();
+        }
+    }
+    None
+}
+
+fn vim_swap(pid: u32, uid: u32, file_arg: &str) {
     // Get tty of terminal that currently runs editor
     let tty = match fs::read_link(format!("/proc/{}/fd/0", pid)) {
         Ok(t) => t,
@@ -86,6 +96,9 @@ fn vim_swap(pid: u32, file_arg: &str) {
             Err(_) => file_arg.to_string(),
         }
     };
+
+    // Read gid before killing the process (proc entry disappears after kill)
+    let gid = get_gid(pid).unwrap_or(uid);
 
     // Get parent shell PID before killing current editor (proc entry disappears after kill)
     let shell_pid = get_parent_pid(pid);
@@ -125,6 +138,9 @@ fn vim_swap(pid: u32, file_arg: &str) {
                     libc::close(tty_fd);
                 }
                 libc::tcflush(0, libc::TCIFLUSH);
+                // Drop privileges to the original user
+                libc::setresgid(gid, gid, gid);
+                libc::setresuid(uid, uid, uid);
                 Ok(())
             });
         }
@@ -230,8 +246,9 @@ async fn main() -> anyhow::Result<()> {
                     write_swap_counts(out, &swap_counts);
                 }
 
+
                 // Now swap to VIM
-                vim_swap(event.pid, arg);
+                vim_swap(event.pid, event.uid, arg);
 
             }
         }
