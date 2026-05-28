@@ -1,6 +1,6 @@
 # vim-forcer
 
-vim-forcer watches for attempts to open nano (or any configured editor) and replaces them with vim, transparently, before the user ever sees the wrong editor.
+vim-forcer watches for attempts to open nano and replaces them with vim, transparently, before the user ever sees the wrong editor.
 
 ## Disclaimer
 
@@ -8,7 +8,19 @@ This tool kills processes and hijacks terminals system-wide. Do not run it on an
 
 ## How it works
 
-**Detection**: vim-forcer loads an eBPF program that attaches to the `execve` syscall tracepoint. Every time a process is exec'd, the kernel-side program checks the executable basename against a list of watched editors. If there is a match, it sends an event to userspace via a ring buffer, carrying the PID and the file argument.
+**Detection**: vim-forcer loads an eBPF program that attaches to the `execve` syscall tracepoint. Every time a process is exec'd, the kernel-side program checks whether the executable basename is `nano`. If there is a match, it sends an event to userspace via a ring buffer, carrying the PID and the file argument.
+
+For renamed binaries, eBPF emits candidate events for processes whose first
+argument looks like a file rather than a flag. Userspace then resolves the
+executable path and counts how often the ELF binary contains the string
+`nano`, case-insensitively. If the count is at least 15, vim-forcer treats it as
+nano and swaps it. Results are cached by device/inode, so repeated launches of
+the same executable do not reread the file.
+
+Candidate events are also rate-filtered in eBPF. For each non-`nano` basename,
+the first two launches in a one-minute window are allowed through for userspace
+inspection. The third launch marks that basename as noisy and suppresses it for
+five minutes. Direct `nano` launches are never rate-filtered.
 
 **Takeover**: once userspace receives an event, it:
 
@@ -18,12 +30,27 @@ This tool kills processes and hijacks terminals system-wide. Do not run it on an
 4. Spawns a new shell on the same terminal running `exec vim '[file]'`.
 5. Waits for vim to exit, then sends `SIGCONT` to the parent shell.
 
-The result is a seamless swap with no visible gap (I am still trying to get rid of the `killed nano` message...).
+The result is a seamless swap with no visible gap (I am still trying to get rid of the `killed nano` message... ).
 It also tracks and stores the number of swaps peformed per uid, if you want to put a wall of shame in your motd or somewhere else.
 
 ## Demo
 
 ![demo](demo.gif)
+
+For a recordable walkthrough of name-based bypasses and string-count catches,
+run vim-forcer in one terminal and the demo script in another:
+
+```shell
+sudo env PATH="/tmp/vim-forcer-demo/vim-wrapper:$PATH" target/release/vim-forcer
+./scripts/circumvention-demo.sh
+```
+
+The script tries a direct `nano` launch, a renamed symlink, a renamed copy, a
+hard link, PATH shadowing, and a shell wrapper. A downloaded executable case is
+included by default: it detects Arch or Ubuntu from `/etc/os-release`,
+downloads the distro nano package into the script's temporary directory,
+extracts `usr/bin/nano` there, renames it, and runs it. Nothing is extracted
+into the repository.
 
 ## AI Assistance Disclosure
 
@@ -69,24 +96,9 @@ copied to a Linux server or VM and run there.
 
 ## License
 
-With the exception of eBPF code, vim-forcer is distributed under the terms
-of either the [MIT license] or the [Apache License] (version 2.0), at your
-option.
+vim-forcer is distributed under the terms of the [MIT license].
 
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
-be dual licensed as above, without any additional terms or conditions.
+The eBPF object declares `Dual MIT/GPL` to the kernel for compatibility with
+Linux eBPF helper licensing rules; the project source is MIT licensed.
 
-### eBPF
-
-All eBPF code is distributed under either the terms of the
-[GNU General Public License, Version 2] or the [MIT license], at your
-option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in this project by you, as defined in the GPL-2 license, shall be
-dual licensed as above, without any additional terms or conditions.
-
-[Apache license]: LICENSE-APACHE
-[MIT license]: LICENSE-MIT
-[GNU General Public License, Version 2]: LICENSE-GPL2
+[MIT license]: LICENSE

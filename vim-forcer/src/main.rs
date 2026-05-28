@@ -1,41 +1,99 @@
-use std::{collections::HashMap as StdHashMap, fs, os::unix::{io::IntoRawFd, process::CommandExt}, process::Command};
+use std::{
+    collections::HashMap as StdHashMap,
+    env, fs,
+    os::unix::{fs::MetadataExt, io::IntoRawFd, process::CommandExt},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use clap::Parser;
 
 #[derive(Parser)]
 #[command(about = "Force vim on users running other editors")]
 struct Args {
-    /// Comma-separated list of tools to intercept
-    #[arg(short = 'e', default_value = "nano")]
-    tools: String,
-
     /// File to write per-user swap counts to
     #[arg(short = 'o')]
     output_file: Option<String>,
 }
 
-use aya::{Pod, maps::{HashMap, RingBuf}, programs::TracePoint};
+use aya::{maps::RingBuf, programs::TracePoint};
 #[rustfmt::skip]
 use log::{debug, warn};
-use tokio::{io::unix::AsyncFd, signal};
+use tokio::io::unix::AsyncFd;
 
-use vim_forcer_common::{ExecEvent,MAX_NAME,MAX_PATH};
+use vim_forcer_common::{ExecEvent, MATCH_KIND_EDITOR_ARG_CANDIDATE, MATCH_KIND_WATCHED_NAME};
 
+const NANO_STRING_THRESHOLD: usize = 15;
 
-// Convert string to bytes for better kernel access
-fn add_watched_tool(map: &mut HashMap<&mut aya::maps::MapData, [u8; MAX_NAME], u8>, tool: &str) {
-    let mut key = [0u8; MAX_NAME];
-    let bytes = tool.as_bytes();
-    let len = bytes.len().min(MAX_NAME-1); // leave room for null terminator
-    key[..len].copy_from_slice(&bytes[..len]);
-    map.insert(key, 1, 0).expect("failed to insert tool");
+fn resolve_command(name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        return Some(PathBuf::from(name));
+    }
+
+    env::var_os("PATH")?
+        .to_string_lossy()
+        .split(':')
+        .find_map(|dir| {
+            let candidate = Path::new(dir).join(name);
+            if candidate.is_file() {
+                Some(candidate)
+            } else {
+                None
+            }
+        })
+}
+
+fn resolve_exec_path(pid: u32, filename: &str) -> Option<PathBuf> {
+    let path = Path::new(filename);
+    if path.is_absolute() {
+        return Some(path.to_path_buf());
+    }
+
+    if filename.contains('/') {
+        return fs::read_link(format!("/proc/{}/cwd", pid))
+            .ok()
+            .map(|cwd| cwd.join(path));
+    }
+
+    resolve_command(filename)
+}
+
+fn executable_id(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+fn count_nano_strings(path: &Path) -> Option<usize> {
+    let data = fs::read(path).ok()?;
+    if data.get(0..4) != Some(b"\x7fELF") {
+        return None;
+    }
+
+    let count = data
+        .windows(4)
+        .filter(|window| window.eq_ignore_ascii_case(b"nano"))
+        .count();
+    Some(count)
+}
+
+fn looks_like_nano(path: &Path, cache: &mut StdHashMap<(u64, u64), usize>) -> Option<usize> {
+    let id = executable_id(path)?;
+    if let Some(count) = cache.get(&id) {
+        return Some(*count);
+    }
+
+    let count = count_nano_strings(path)?;
+    cache.insert(id, count);
+    Some(count)
 }
 
 // TODO: this should only be done once at start, is there a better way?
 fn username_for_uid(uid: u32) -> String {
-    fs::read_to_string("/etc/passwd").ok()
+    fs::read_to_string("/etc/passwd")
+        .ok()
         .and_then(|contents| {
-            contents.lines()
+            contents
+                .lines()
                 .find(|line| {
                     let mut fields = line.splitn(4, ':');
                     fields.next();
@@ -97,37 +155,45 @@ fn vim_swap(pid: u32, uid: u32, file_arg: &str) {
         }
     };
 
-    // Read gid before killing the process (proc entry disappears after kill)
+    // Read gid and parent shell before killing the process
     let gid = get_gid(pid).unwrap_or(uid);
-
-    // Get parent shell PID before killing current editor (proc entry disappears after kill)
     let shell_pid = get_parent_pid(pid);
 
+    // Capture the terminal state before either nano or vim can leave it in raw mode.
+    let tty_fd = match std::fs::OpenOptions::new().read(true).write(true).open(tty) {
+        Ok(f) => f.into_raw_fd(),
+        Err(_) => return,
+    };
+    let saved_termios = unsafe {
+        let mut termios = std::mem::zeroed();
+        if libc::tcgetattr(tty_fd, &mut termios) == 0 {
+            Some(termios)
+        } else {
+            None
+        }
+    };
+
     // Important: We need to stop the shell first so it can't reclaim the TTY when we kill nano
+    // Otherwise vim and shell would overlay, making the shell unusable
     if let Some(spid) = shell_pid {
-        unsafe { libc::kill(spid as i32, libc::SIGSTOP); }
+        unsafe {
+            libc::kill(spid as i32, libc::SIGSTOP);
+        }
     }
 
     // Now we kill nano
-    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
     std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Claim TTY
-    let tty_fd = match std::fs::OpenOptions::new().read(true).write(true).open(tty) {
-        Ok(f) => f.into_raw_fd(),
-        Err(_) => {
-            // If failed to get tty, resume shell by sending SIGCONT
-            if let Some(spid) = shell_pid {
-                unsafe { libc::kill(spid as i32, libc::SIGCONT); }
-            }
-            return;
-        }
-    };
 
     // Spawn vim on tty
     std::thread::spawn(move || {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", &format!("stty sane; clear; exec vim '{}'", file_path)]);
+        cmd.args([
+            "-c",
+            &format!("stty sane; exec vim -N -n +'stopinsert' '{}'", file_path),
+        ]);
         unsafe {
             cmd.pre_exec(move || {
                 libc::setsid();
@@ -144,12 +210,26 @@ fn vim_swap(pid: u32, uid: u32, file_arg: &str) {
                 Ok(())
             });
         }
+
+        // Resume the shell once vim exits
         if let Ok(mut child) = cmd.spawn() {
             child.wait().ok();
         }
-        // Resume the shell once vim exits
+
+        unsafe {
+            if let Some(termios) = saved_termios {
+                libc::tcsetattr(tty_fd, libc::TCSANOW, &termios);
+                libc::tcflush(tty_fd, libc::TCIFLUSH);
+            }
+            let cleanup = b"\r\x1b[2K";
+            libc::write(tty_fd, cleanup.as_ptr().cast(), cleanup.len());
+            libc::close(tty_fd);
+        }
+
         if let Some(spid) = shell_pid {
-            unsafe { libc::kill(spid as i32, libc::SIGCONT); }
+            unsafe {
+                libc::kill(spid as i32, libc::SIGCONT);
+            }
             // TODO: Send clear command? We can still see the kill message after returning from vim
         }
     });
@@ -202,24 +282,18 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach("syscalls", "sys_enter_execve")?;
 
-    // ---------------- After template! ----------------
+    println!(
+        "Watching nano by name and by ELF string count threshold ({NANO_STRING_THRESHOLD} occurrences of \"nano\")"
+    );
 
-    let mut watched: HashMap<_, [u8; MAX_NAME], u8> =
-        HashMap::try_from(ebpf.map_mut("WATCHED_TOOLS").unwrap())?;
-
-    let tools: Vec<&str> = args.tools.split(',').map(str::trim).collect();
     let output_file = args.output_file;
 
-    for tool in &tools {
-        add_watched_tool(&mut watched, tool);
-        println!("Watching: {}", tool);
-    }
-
     // Channel from kernel, use asyncfc to wait for events without polling
-    let mut ring_buf = RingBuf::try_from(ebpf.map_mut("EVENTS").unwrap())?;
+    let ring_buf = RingBuf::try_from(ebpf.map_mut("EVENTS").unwrap())?;
     let mut async_fd = AsyncFd::new(ring_buf)?;
 
     let mut swap_counts: StdHashMap<u32, u64> = StdHashMap::new();
+    let mut nano_string_counts: StdHashMap<(u64, u64), usize> = StdHashMap::new();
 
     loop {
         // Wait for data to be available
@@ -229,7 +303,6 @@ async fn main() -> anyhow::Result<()> {
         while let Some(item) = ring.next() {
             let data = item.as_ref(); // Data is read as slice of bytes
             if data.len() >= std::mem::size_of::<ExecEvent>() {
-
                 // Read data from pointed memory, necessary unsafe action
                 let event: &ExecEvent = unsafe { &*(data.as_ptr() as *const ExecEvent) };
 
@@ -240,21 +313,48 @@ async fn main() -> anyhow::Result<()> {
                     .unwrap_or_default()
                     .trim_end_matches('\0');
 
+                if event.match_kind == MATCH_KIND_EDITOR_ARG_CANDIDATE {
+                    let Some(exec_path) = resolve_exec_path(event.pid, path) else {
+                        continue;
+                    };
+
+                    let nano_count =
+                        looks_like_nano(&exec_path, &mut nano_string_counts).unwrap_or(0);
+                    if nano_count < NANO_STRING_THRESHOLD {
+                        continue;
+                    }
+
+                    *swap_counts.entry(event.uid).or_insert(0) += 1;
+                    println!(
+                        "PID {} exec {} {} - found {} nano string(s); swapping to VIM!",
+                        event.pid,
+                        exec_path.display(),
+                        arg,
+                        nano_count
+                    );
+                    if let Some(ref out) = output_file {
+                        write_swap_counts(out, &swap_counts);
+                    }
+
+                    vim_swap(event.pid, event.uid, arg);
+                    continue;
+                }
+
+                if event.match_kind != MATCH_KIND_WATCHED_NAME {
+                    continue;
+                }
+
                 *swap_counts.entry(event.uid).or_insert(0) += 1;
                 println!("PID {} exec {} {} - Swapping to VIM!", event.pid, path, arg);
                 if let Some(ref out) = output_file {
                     write_swap_counts(out, &swap_counts);
                 }
 
-
                 // Now swap to VIM
                 vim_swap(event.pid, event.uid, arg);
-
             }
         }
 
         guard.clear_ready();
     }
-
-    Ok(())
 }
