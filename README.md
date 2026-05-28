@@ -16,6 +16,10 @@ An eBPF program hooks the `execve` syscall. The moment nano dares to launch, it 
 
 See [BUILDING.md](BUILDING.md).
 
+## Tübix 2026
+
+This project was written for [Tübix 2026](https://tuebix.org).
+
 ## AI Assistance Disclosure
 
-Written with AI assistance. All code reviewed and tested by me before inclusion. Unlike certain editors, I take some responsibility for my choices.
+This project was developed with assistance from AI-powered coding tools. All code has been reviewed, tested, and verified before inclusion.
