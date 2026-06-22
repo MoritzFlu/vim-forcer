@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="vim-forcer.svg" alt="vim-forcer" width="160">
+</p>
+
 # vim-forcer
 
 A daemon that intercepts nano and silently replaces it with vim.

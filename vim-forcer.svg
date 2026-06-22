@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-label="vim-forcer">
+  <rect width="200" height="200" rx="45" fill="#1FA055"/>
+  <text x="100" y="100" text-anchor="middle" dominant-baseline="central"
+        font-family="'JetBrains Mono','SFMono-Regular',Menlo,Consolas,monospace"
+        font-weight="700" font-size="50" letter-spacing="-1" fill="#F5FBF6">nano</text>
+  <rect x="31" y="91" width="138" height="11" rx="3" fill="#E5604D" transform="rotate(-7 100 96.5)"/>
+</svg>
